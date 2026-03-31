@@ -6,7 +6,13 @@
  */
 
 import { createOrb, type OrbState } from "./orb";
-import { createVoiceInput, createAudioPlayer } from "./voice";
+import {
+  createVoiceInput,
+  createAudioPlayer,
+  createServerVoiceInput,
+  hasNativeSpeechRecognition,
+  type VoiceInput,
+} from "./voice";
 import { createSocket } from "./ws";
 import { openSettings, checkFirstTimeSetup } from "./settings";
 import "./style.css";
@@ -48,7 +54,7 @@ const canvas = document.getElementById("orb-canvas") as HTMLCanvasElement;
 const orb = createOrb(canvas);
 
 const wsProto = window.location.protocol === "https:" ? "wss:" : "ws:";
-const WS_URL = `${wsProto}//${window.location.host}/ws/voice`;
+const WS_URL = `${wsProto}//${window.location.hostname}:8340/ws/voice`;
 const socket = createSocket(WS_URL);
 
 const audioPlayer = createAudioPlayer();
@@ -80,18 +86,32 @@ function transition(newState: State) {
 // Voice input
 // ---------------------------------------------------------------------------
 
-const voiceInput = createVoiceInput(
-  (text: string) => {
-    // Cancel any current JARVIS response before sending new input
-    audioPlayer.stop();
-    // User spoke — send transcript
-    socket.send({ type: "transcript", text, isFinal: true });
-    transition("thinking");
-  },
-  (msg: string) => {
-    showError(msg);
-  }
-);
+let voiceInput: VoiceInput;
+
+if (hasNativeSpeechRecognition()) {
+  voiceInput = createVoiceInput(
+    (text: string) => {
+      audioPlayer.stop();
+      socket.send({ type: "transcript", text, isFinal: true });
+      transition("thinking");
+    },
+    (msg: string) => {
+      showError(msg);
+    }
+  );
+} else {
+  console.log("[voice] Web Speech API unavailable, using server-side STT");
+  voiceInput = createServerVoiceInput(
+    (blob: Blob) => {
+      audioPlayer.stop();
+      socket.sendBinary(blob);
+      transition("thinking");
+    },
+    (msg: string) => {
+      showError(msg);
+    }
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Audio playback finished

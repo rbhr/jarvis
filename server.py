@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -1043,6 +1044,34 @@ _last_greeting_time: float = 0
 
 
 # ---------------------------------------------------------------------------
+# STT (faster-whisper, lazy-loaded)
+# ---------------------------------------------------------------------------
+
+_whisper_model = None
+
+def _get_whisper_model():
+    global _whisper_model
+    if _whisper_model is None:
+        from faster_whisper import WhisperModel
+        log.info("Loading Whisper model (base.en)...")
+        _whisper_model = WhisperModel("base.en", device="cpu", compute_type="int8")
+        log.info("Whisper model ready")
+    return _whisper_model
+
+async def transcribe_audio(audio_bytes: bytes) -> str:
+    """Transcribe audio bytes using faster-whisper."""
+    def _transcribe():
+        model = _get_whisper_model()
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=True) as f:
+            f.write(audio_bytes)
+            f.flush()
+            segments, _info = model.transcribe(f.name, beam_size=3, language="en")
+            return " ".join(seg.text.strip() for seg in segments).strip()
+
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _transcribe)
+
+# ---------------------------------------------------------------------------
 # TTS (Fish Audio)
 # ---------------------------------------------------------------------------
 
@@ -1362,6 +1391,10 @@ app.add_middleware(
 
 
 # -- REST Endpoints --------------------------------------------------------
+
+@app.get("/")
+async def root():
+    return {"status": "ok", "message": "JARVIS backend is running. You can close this tab."}
 
 @app.get("/api/health")
 async def health():
@@ -1934,31 +1967,57 @@ async def voice_handler(ws: WebSocket):
             return  # WebSocket already gone
 
         while True:
-            raw = await ws.receive_text()
-            try:
-                msg = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
+            message = await ws.receive()
 
-            # ── Fix-self: activate work mode in JARVIS repo ──
-            if msg.get("type") == "fix_self":
-                jarvis_dir = str(Path(__file__).parent)
-                await work_session.start(jarvis_dir)
-                response_text = "Work mode active in my own repo, sir. Tell me what needs fixing."
-                tts = strip_markdown_for_tts(response_text)
-                await ws.send_json({"type": "status", "state": "speaking"})
-                audio = await synthesize_speech(tts)
-                if audio:
-                    await ws.send_json({"type": "audio", "data": audio, "text": response_text})
-                else:
-                    await ws.send_json({"type": "text", "text": response_text})
-                continue
+            if message.get("type") == "websocket.disconnect":
+                break
 
-            if msg.get("type") != "transcript" or not msg.get("isFinal"):
-                continue
+            user_text = None
 
-            user_text = apply_speech_corrections(msg.get("text", "").strip())
-            if not user_text:
+            if message.get("bytes"):
+                # Binary frame = raw audio from server-side STT fallback
+                audio_data = message["bytes"]
+                log.info(f"Received audio for STT: {len(audio_data)} bytes")
+                await ws.send_json({"type": "status", "state": "thinking"})
+                try:
+                    user_text = await transcribe_audio(audio_data)
+                    if not user_text:
+                        log.warning("STT returned empty transcript")
+                        await ws.send_json({"type": "status", "state": "idle"})
+                        continue
+                    log.info(f"STT transcribed: {user_text}")
+                except Exception as e:
+                    log.error(f"STT error: {e}")
+                    await ws.send_json({"type": "status", "state": "idle"})
+                    continue
+            elif message.get("text"):
+                raw = message["text"]
+                try:
+                    msg = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+
+                # ── Fix-self: activate work mode in JARVIS repo ──
+                if msg.get("type") == "fix_self":
+                    jarvis_dir = str(Path(__file__).parent)
+                    await work_session.start(jarvis_dir)
+                    response_text = "Work mode active in my own repo, sir. Tell me what needs fixing."
+                    tts = strip_markdown_for_tts(response_text)
+                    await ws.send_json({"type": "status", "state": "speaking"})
+                    audio = await synthesize_speech(tts)
+                    if audio:
+                        await ws.send_json({"type": "audio", "data": audio, "text": response_text})
+                    else:
+                        await ws.send_json({"type": "text", "text": response_text})
+                    continue
+
+                if msg.get("type") != "transcript" or not msg.get("isFinal"):
+                    continue
+
+                user_text = apply_speech_corrections(msg.get("text", "").strip())
+                if not user_text:
+                    continue
+            else:
                 continue
 
             # Cancel any in-flight response
