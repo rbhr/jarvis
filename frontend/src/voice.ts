@@ -217,8 +217,9 @@ export function createServerVoiceInput(
 
       startVAD();
       console.log("[voice] server-side STT active, mime:", mimeType);
-    } catch {
-      onError("Microphone access denied. Please allow microphone access.");
+    } catch (err) {
+      console.error("[voice] initStream error:", err);
+      onError("Microphone error: " + (err instanceof Error ? err.message : String(err)));
     }
   }
 

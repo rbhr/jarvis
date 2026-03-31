@@ -101,8 +101,10 @@ if (hasNativeSpeechRecognition()) {
   );
 } else {
   console.log("[voice] Web Speech API unavailable, using server-side STT");
+  showError("Using server-side voice recognition");
   voiceInput = createServerVoiceInput(
     (blob: Blob) => {
+      console.log("[voice] sending blob to server:", blob.size);
       audioPlayer.stop();
       socket.sendBinary(blob);
       transition("thinking");

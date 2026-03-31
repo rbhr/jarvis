@@ -1392,10 +1392,6 @@ app.add_middleware(
 
 # -- REST Endpoints --------------------------------------------------------
 
-@app.get("/")
-async def root():
-    return {"status": "ok", "message": "JARVIS backend is running. You can close this tab."}
-
 @app.get("/api/health")
 async def health():
     return {"status": "online", "name": "JARVIS", "version": "0.1.0"}
