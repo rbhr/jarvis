@@ -170,25 +170,26 @@ socket.onMessage((msg) => {
 // Kick off
 // ---------------------------------------------------------------------------
 
+// Prime audio on first user interaction (required by iOS Safari).
+// Uses the persistent Audio element inside audioPlayer so subsequent
+// plays from WebSocket callbacks are allowed.
+let audioPrimed = false;
+function primeAudio() {
+  if (audioPrimed) return;
+  audioPrimed = true;
+  audioPlayer.prime();
+  const ctx = audioPlayer.getAnalyser().context as AudioContext;
+  if (ctx.state === "suspended") ctx.resume();
+}
+document.addEventListener("click", primeAudio);
+document.addEventListener("touchstart", primeAudio);
+document.addEventListener("keydown", primeAudio, { once: true });
+
 // Start listening after a brief delay for the orb to render
 setTimeout(() => {
   voiceInput.start();
   transition("listening");
 }, 1000);
-
-// Resume AudioContext on ANY user interaction (browser autoplay policy)
-function ensureAudioContext() {
-  const ctx = audioPlayer.getAnalyser().context as AudioContext;
-  if (ctx.state === "suspended") {
-    ctx.resume().then(() => console.log("[audio] context resumed"));
-  }
-}
-document.addEventListener("click", ensureAudioContext);
-document.addEventListener("touchstart", ensureAudioContext);
-document.addEventListener("keydown", ensureAudioContext, { once: true });
-
-// Try to resume audio context on load
-ensureAudioContext();
 
 // ---------------------------------------------------------------------------
 // UI Controls

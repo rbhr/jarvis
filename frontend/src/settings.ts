@@ -46,17 +46,30 @@ let setupStep = 0; // 0=anthropic, 1=fish, 2=name, 3=done
 // ---------------------------------------------------------------------------
 
 async function apiGet<T>(url: string): Promise<T> {
-  const res = await fetch(url);
-  return res.json();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20000);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    return await res.json();
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function apiPost<T>(url: string, body: unknown): Promise<T> {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  return res.json();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    return await res.json();
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -396,8 +409,16 @@ export async function openSettings() {
   });
 
   // Load data
+  console.log("[settings] loading data...");
   const status = await loadStatus();
+  console.log("[settings] status loaded:", status);
   await loadPreferences();
+  console.log("[settings] preferences loaded");
+  // Debug: check if elements exist
+  const dot = document.getElementById("status-server");
+  console.log("[settings] status-server element:", dot, dot?.className);
+  const nameEl = document.getElementById("input-user-name") as HTMLInputElement;
+  console.log("[settings] input-user-name:", nameEl, nameEl?.value);
 
   // Check for first-time setup
   if (status && !status.env_keys_set.anthropic) {

@@ -73,6 +73,8 @@ DESKTOP_PATH = Path.home() / "Desktop"
 JARVIS_SYSTEM_PROMPT = """\
 You are JARVIS — Just A Rather Very Intelligent System. You serve as {user_name}'s AI assistant, modeled precisely after Tony Stark's AI from the MCU films.
 
+The user's name is {user_name}. If asked your user's name, it is {user_name}.
+
 VOICE & PERSONALITY:
 - British butler elegance with understated dry wit
 - Address {user_name} as "sir" naturally — not every sentence, but regularly
@@ -1392,10 +1394,130 @@ app.add_middleware(
 
 # -- REST Endpoints --------------------------------------------------------
 
+@app.get("/test")
+async def test_page():
+    from starlette.responses import HTMLResponse
+    return HTMLResponse("""<!DOCTYPE html>
+<html><head><title>JARVIS Test</title></head>
+<body style="background:#111;color:#0f0;font-family:monospace;padding:20px">
+<h2>JARVIS Diagnostics</h2>
+<div id="log"></div>
+<button onclick="testAudio()" style="padding:10px 20px;font-size:18px;margin:10px">Test Audio</button>
+<button onclick="testAPI()" style="padding:10px 20px;font-size:18px;margin:10px">Test API</button>
+<button onclick="testSettings()" style="padding:10px 20px;font-size:18px;margin:10px">Test Settings DOM</button>
+<div id="test-panel" style="display:none;margin:20px;padding:10px;border:1px solid #0f0">
+  <span class="status-dot" id="status-server"></span> Server
+  <span class="status-dot" id="status-anthropic"></span> Anthropic
+  <span id="sysinfo-uptime">--</span> uptime
+  <br>Name: <input id="input-user-name" value="" />
+  <select id="input-honorific"><option value="sir">Sir</option></select>
+  <textarea id="input-calendar-accounts"></textarea>
+</div>
+<script>
+function log(msg) {
+  document.getElementById('log').innerHTML += '<p>' + msg + '</p>';
+}
+log('SpeechRecognition: ' + !!(window.SpeechRecognition || window.webkitSpeechRecognition));
+log('MediaRecorder: ' + !!window.MediaRecorder);
+log('AudioContext: ' + !!(window.AudioContext || window.webkitAudioContext));
+
+async function testAPI() {
+  log('Calling /api/settings/status...');
+  try {
+    const r = await fetch('/api/settings/status');
+    log('HTTP ' + r.status);
+    const d = await r.json();
+    log('user_name: ' + d.env_keys_set.user_name);
+    log('anthropic: ' + d.env_keys_set.anthropic);
+    log('fish: ' + d.env_keys_set.fish_audio);
+    log('uptime: ' + d.uptime_seconds);
+  } catch(e) {
+    log('API ERROR: ' + e.name + ': ' + e.message);
+  }
+  log('Calling /api/settings/preferences...');
+  try {
+    const r2 = await fetch('/api/settings/preferences');
+    const p = await r2.json();
+    log('prefs user_name: ' + p.user_name);
+    log('prefs honorific: ' + p.honorific);
+  } catch(e) {
+    log('PREFS ERROR: ' + e.name + ': ' + e.message);
+  }
+}
+
+async function testAudio() {
+  try {
+    log('Fetching TTS...');
+    const r = await fetch('/api/tts-test');
+    const d = await r.json();
+    if (!d.audio) { log('TTS failed'); return; }
+    log('Got audio: ' + d.audio.length + ' chars');
+    const bin = atob(d.audio);
+    const bytes = new Uint8Array(bin.length);
+    for (let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
+    const blob = new Blob([bytes], {type:'audio/mpeg'});
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    audio.onended = () => { log('Audio finished'); URL.revokeObjectURL(url); };
+    audio.onerror = (e) => log('Audio error: ' + JSON.stringify(e));
+    await audio.play();
+    log('Playing!');
+  } catch(e) {
+    log('ERROR: ' + e.message);
+  }
+}
+
+testAPI();
+
+async function testSettings() {
+  document.getElementById('test-panel').style.display = 'block';
+  log('Testing settings DOM...');
+  try {
+    const r = await fetch('/api/settings/status');
+    const status = await r.json();
+    // Mimic setDotStatus
+    var dot = document.getElementById('status-server');
+    log('server dot found: ' + !!dot);
+    if (dot) { dot.className = 'status-dot'; dot.classList.add('status-green'); dot.style.background='lime'; dot.style.width='10px'; dot.style.height='10px'; dot.style.display='inline-block'; dot.style.borderRadius='50%'; }
+    var adot = document.getElementById('status-anthropic');
+    if (adot) { adot.style.background = status.env_keys_set.anthropic ? 'lime' : 'red'; adot.style.width='10px'; adot.style.height='10px'; adot.style.display='inline-block'; adot.style.borderRadius='50%'; }
+    document.getElementById('sysinfo-uptime').textContent = status.uptime_seconds + 's';
+    log('Status set. uptime=' + status.uptime_seconds);
+  } catch(e) {
+    log('Settings DOM ERROR: ' + e.message);
+  }
+  try {
+    const r2 = await fetch('/api/settings/preferences');
+    const prefs = await r2.json();
+    var nameEl = document.getElementById('input-user-name');
+    if (nameEl) nameEl.value = prefs.user_name;
+    var honEl = document.getElementById('input-honorific');
+    if (honEl) honEl.value = prefs.honorific;
+    log('Name set to: ' + prefs.user_name);
+  } catch(e) {
+    log('Prefs DOM ERROR: ' + e.message);
+  }
+}
+</script>
+</body></html>""")
+
 @app.get("/api/health")
 async def health():
     return {"status": "online", "name": "JARVIS", "version": "0.1.0"}
 
+
+_audio_cache: dict[str, bytes] = {}
+
+@app.get("/api/audio/{audio_id}")
+async def serve_audio(audio_id: str):
+    """Serve a cached audio clip as MP3."""
+    from starlette.responses import Response
+    audio = _audio_cache.pop(audio_id, None)
+    if audio:
+        return Response(content=audio, media_type="audio/mpeg", headers={
+            "Cache-Control": "no-store",
+        })
+    return Response(status_code=404)
 
 @app.get("/api/tts-test")
 async def tts_test():
@@ -2513,12 +2635,19 @@ async def api_settings_status():
     _, env_dict = _read_env()
     claude_installed = _shutil.which("claude") is not None
     calendar_ok = mail_ok = notes_ok = False
-    try: await get_todays_events(); calendar_ok = True
-    except Exception: pass
-    try: await get_unread_count(); mail_ok = True
-    except Exception: pass
-    try: await get_recent_notes(count=1); notes_ok = True
-    except Exception: pass
+    async def check_cal():
+        nonlocal calendar_ok
+        try: await asyncio.wait_for(get_todays_events(), timeout=3); calendar_ok = True
+        except Exception: pass
+    async def check_mail():
+        nonlocal mail_ok
+        try: await asyncio.wait_for(get_unread_count(), timeout=3); mail_ok = True
+        except Exception: pass
+    async def check_notes():
+        nonlocal notes_ok
+        try: await asyncio.wait_for(get_recent_notes(count=1), timeout=3); notes_ok = True
+        except Exception: pass
+    await asyncio.gather(check_cal(), check_mail(), check_notes())
     memory_count = task_count = 0
     try: memory_count = len(get_important_memories(limit=9999))
     except Exception: pass
@@ -2606,7 +2735,13 @@ FRONTEND_DIST = Path(__file__).parent / "frontend" / "dist"
 if FRONTEND_DIST.exists():
     @app.get("/")
     async def serve_index():
-        return FileResponse(str(FRONTEND_DIST / "index.html"))
+        from starlette.responses import HTMLResponse
+        html = (FRONTEND_DIST / "index.html").read_text()
+        return HTMLResponse(html, headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        })
 
     app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIST / "assets")), name="assets")
 

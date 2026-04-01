@@ -258,6 +258,7 @@ export interface AudioPlayer {
   enqueue(base64: string): Promise<void>;
   stop(): void;
   getAnalyser(): AnalyserNode;
+  prime(): void;
   onFinished(cb: () => void): void;
 }
 
@@ -268,75 +269,79 @@ export function createAudioPlayer(): AudioPlayer {
   analyser.smoothingTimeConstant = 0.8;
   analyser.connect(audioCtx.destination);
 
-  const queue: AudioBuffer[] = [];
+  // Use a single persistent Audio element — required for iOS Safari.
+  // iOS only allows audio playback from an element that was first played
+  // during a user gesture. By reusing the same element, the initial prime
+  // (from a tap) carries forward to all subsequent plays.
+  const persistentAudio = new Audio();
+  persistentAudio.setAttribute("playsinline", "true");
+
+  const queue: string[] = [];
   let isPlaying = false;
-  let currentSource: AudioBufferSourceNode | null = null;
   let finishedCallback: (() => void) | null = null;
 
   function playNext() {
     if (queue.length === 0) {
       isPlaying = false;
-      currentSource = null;
       finishedCallback?.();
       return;
     }
 
     isPlaying = true;
-    const buffer = queue.shift()!;
-    const source = audioCtx.createBufferSource();
-    source.buffer = buffer;
-    source.connect(analyser);
-    currentSource = source;
+    const base64 = queue.shift()!;
 
-    source.onended = () => {
-      if (currentSource === source) {
-        playNext();
-      }
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    const blob = new Blob([bytes], { type: "audio/mpeg" });
+    const blobUrl = URL.createObjectURL(blob);
+
+    persistentAudio.src = blobUrl;
+
+    persistentAudio.onended = () => {
+      URL.revokeObjectURL(blobUrl);
+      playNext();
     };
 
-    source.start();
+    persistentAudio.onerror = () => {
+      console.error("[audio] playback error");
+      URL.revokeObjectURL(blobUrl);
+      playNext();
+    };
+
+    persistentAudio.play().catch((err) => {
+      console.error("[audio] play() rejected:", err);
+      URL.revokeObjectURL(blobUrl);
+      playNext();
+    });
   }
 
   return {
     async enqueue(base64: string) {
-      // Resume audio context (browser autoplay policy)
-      if (audioCtx.state === "suspended") {
-        console.log("[audio] resuming suspended AudioContext");
-        await audioCtx.resume();
-        console.log("[audio] AudioContext state:", audioCtx.state);
-      }
-
-      try {
-        const binary = atob(base64);
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) {
-          bytes[i] = binary.charCodeAt(i);
-        }
-        const audioBuffer = await audioCtx.decodeAudioData(bytes.buffer.slice(0));
-        queue.push(audioBuffer);
-        if (!isPlaying) playNext();
-      } catch (err) {
-        console.error("[audio] decode error:", err);
-        // Skip bad audio, continue
-        if (!isPlaying && queue.length > 0) playNext();
-      }
+      queue.push(base64);
+      if (!isPlaying) playNext();
     },
 
     stop() {
       queue.length = 0;
-      if (currentSource) {
-        try {
-          currentSource.stop();
-        } catch {
-          // Already stopped
-        }
-        currentSource = null;
-      }
+      persistentAudio.pause();
+      persistentAudio.src = "";
       isPlaying = false;
     },
 
     getAnalyser() {
       return analyser;
+    },
+
+    // Call this once from a user gesture to prime iOS audio
+    prime() {
+      persistentAudio.src = "data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAABhgC7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAABhgBWMKBOAAAAAAD/+1DEAAAFeAVX9AAAA0W8q/8pgAABNQAAAA0AAAANICAIAgAAMffBMBAEHwfB8Hw+CAIfg+D7//y4Pg+D4f/8uD4Pg+H//+XB8HwfD///8uD4Pg+D///+XB8HwfB////Lg+D4Pg///8=";
+      persistentAudio.play().then(() => {
+        persistentAudio.pause();
+        console.log("[audio] primed");
+      }).catch(() => {});
     },
 
     onFinished(cb: () => void) {
