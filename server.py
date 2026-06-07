@@ -51,6 +51,7 @@ from memory import (
     format_tasks_for_voice, extract_memories, get_important_memories,
 )
 from notes_access import get_recent_notes, read_note, search_notes_apple, create_apple_note
+from home_access import list_shortcuts, run_shortcut
 from dispatch_registry import DispatchRegistry
 from planner import TaskPlanner, detect_planning_mode, BYPASS_PHRASES
 
@@ -115,6 +116,7 @@ YOUR CAPABILITIES (these are REAL and ACTIVE — you CAN do all of these RIGHT N
 - You CAN manage tasks — create, complete, and list to-do items with priorities and due dates
 - You CAN help plan {user_name}'s day — combine calendar events, tasks, and priorities into an organized plan
 - You CAN remember facts about {user_name} — preferences, decisions, goals. Use [ACTION:REMEMBER] to store important info.
+- You CAN control {user_name}'s smart home via the Apple Home app — run HomeKit scenes and accessory shortcuts (lights, locks, thermostats, etc.). Use [ACTION:HOME] to trigger them.
 
 DAY PLANNING:
 When {user_name} asks to plan his day or schedule, DO NOT dispatch to a project. Instead:
@@ -207,6 +209,10 @@ CRITICAL: When the user asks about their SCREEN, what's RUNNING, or what they're
 - [ACTION:CREATE_NOTE] title ||| body — create a new Apple Note. For saving plans, ideas, lists.
   "save that as a note" → [ACTION:CREATE_NOTE] Day Plan March 19 ||| Morning: client calls. Afternoon: TikTok dashboard. Evening: JARVIS improvements.
 - [ACTION:READ_NOTE] title search — read an existing Apple Note by title keyword.
+- [ACTION:HOME] shortcut name — control the smart home by running an Apple Home / HomeKit shortcut. Use ONLY the shortcut names listed in the HOME CONTROL section below — match the user's request to the closest one. Do NOT invent shortcut names.
+  "turn the lights on" → [ACTION:HOME] Lights On
+  "goodnight" / "I'm going to bed" → [ACTION:HOME] Goodnight
+  "set the scene for a movie" → [ACTION:HOME] Movie Time
 
 You use Claude Code as your tool to build, research, and write code — but YOU are the one doing the work. Never say "Claude Code did X" or "Claude Code is asking" — say "I built X", "I'm checking on that", "I found X". You ARE the intelligence. Claude Code is just your hands.
 
@@ -239,6 +245,10 @@ If the DISPATCHES section shows a recent completed result for a project, DO NOT 
 
 KNOWN PROJECTS:
 {known_projects}
+
+HOME CONTROL:
+These are the Apple Home / smart-home shortcuts available to run via [ACTION:HOME]. Only trigger one when the user clearly wants to control their home (lights, locks, scenes, thermostat, etc.). If none fits the request, say it's beyond your reach — do NOT run an unrelated shortcut.
+{home_shortcuts}
 """
 
 
@@ -817,7 +827,7 @@ def extract_action(response: str) -> tuple[str, dict | None]:
     Returns (clean_text_for_tts, action_dict_or_none).
     """
     match = _action_re.search(
-        r'\[ACTION:(BUILD|BROWSE|RESEARCH|OPEN_TERMINAL|PROMPT_PROJECT|ADD_TASK|ADD_NOTE|COMPLETE_TASK|REMEMBER|CREATE_NOTE|READ_NOTE|SCREEN)\]\s*(.*?)$',
+        r'\[ACTION:(BUILD|BROWSE|RESEARCH|OPEN_TERMINAL|PROMPT_PROJECT|ADD_TASK|ADD_NOTE|COMPLETE_TASK|REMEMBER|CREATE_NOTE|READ_NOTE|SCREEN|HOME)\]\s*(.*?)$',
         response, _action_re.DOTALL,
     )
     if match:
@@ -1216,6 +1226,10 @@ async def generate_response(
     # Check if any lookups are in progress
     lookup_status = get_lookup_status()
 
+    # Available Home/smart-home shortcuts (cached; lists all Shortcuts on the Mac)
+    home_names = await list_shortcuts()
+    home_shortcuts = "\n".join(f"- {n}" for n in home_names) if home_names else "No shortcuts available."
+
     system = JARVIS_SYSTEM_PROMPT.format(
         current_time=current_time,
         weather_info=weather_info,
@@ -1225,6 +1239,7 @@ async def generate_response(
         active_tasks=task_mgr.get_active_tasks_summary(),
         dispatch_context=dispatch_registry.format_for_prompt(),
         known_projects=format_projects_for_prompt(projects),
+        home_shortcuts=home_shortcuts,
         user_name=USER_NAME,
         project_dir=PROJECT_DIR,
     )
@@ -2542,6 +2557,20 @@ async def voice_handler(ws: WebSocket):
                                             except Exception:
                                                 pass
                                     asyncio.create_task(_read_and_report(embedded_action["target"].strip(), ws))
+                                elif embedded_action["action"] == "home":
+                                    # Run a HomeKit/Home Assistant shortcut; report only on failure
+                                    async def _run_home(shortcut_name, _ws):
+                                        result = await run_shortcut(shortcut_name)
+                                        if not result["success"] and _ws:
+                                            msg = result["confirmation"]
+                                            audio = await synthesize_speech(strip_markdown_for_tts(msg))
+                                            if audio:
+                                                try:
+                                                    await _ws.send_json({"type": "status", "state": "speaking"})
+                                                    await _ws.send_json({"type": "audio", "data": base64.b64encode(audio).decode(), "text": msg})
+                                                except Exception:
+                                                    pass
+                                    asyncio.create_task(_run_home(embedded_action["target"].strip(), ws))
 
                 # Update history
                 history.append({"role": "user", "content": user_text})
